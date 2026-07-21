@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Superfície - <span id="planet-title">Planeta</span></title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+        #ui {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.6); padding: 12px 18px; border-radius: 8px; z-index: 100;
+            font-size: 18px;
+        }
+        #back-btn {
+            position: absolute; top: 20px; right: 20px; z-index: 100;
+            padding: 12px 20px; background: rgba(255,80,80,0.9);
+            color: white; border: none; border-radius: 30px;
+            cursor: pointer; font-size: 16px; font-weight: bold;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 20px; height: 20px; margin: -10px 0 0 -10px;
+            color: rgba(255,255,255,0.7); font-size: 28px;
+            pointer-events: none; z-index: 200;
+        }
+        canvas { display: block; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+</head>
+<body>
+    <div id="ui">Explorando: <span id="planet-name">Planeta</span><br>
+        WASD = Mover | Mouse = Olhar | Shift = Correr | Espaço = Pular
+    </div>
+    <button id="back-btn">← Voltar ao Espaço</button>
+    <div id="crosshair">+</div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const planetKey = urlParams.get('planet') || 'terra';
+
+        const planetConfigs = {
+            terra:     { name: "Terra",     skyColor: 0x88aaff, fogColor: 0xaaccff, fogDensity: 0.0006, terrainColor: 0x3d8c40, particleColor: 0xaaddff, particleCount: 1200 },
+            marte:     { name: "Marte",     skyColor: 0xffbb99, fogColor: 0xcc8866, fogDensity: 0.0011, terrainColor: 0xb55a3d, particleColor: 0xffddaa, particleCount: 900 },
+            venus:     { name: "Vênus",     skyColor: 0xffeecc, fogColor: 0xccaa77, fogDensity: 0.0028, terrainColor: 0x8b5a2b, particleColor: 0xffeecc, particleCount: 1800 },
+            mercurio:  { name: "Mercúrio",  skyColor: 0x666666, fogColor: 0x444444, fogDensity: 0.0004, terrainColor: 0x777777, particleColor: 0xaaaaaa, particleCount: 500 },
+            jupiter:   { name: "Júpiter",   skyColor: 0xe0c090, fogColor: 0xb38b5a, fogDensity: 0.0025, terrainColor: 0xa67c52, particleColor: 0xffeecc, particleCount: 2200 }
+        };
+
+        const config = planetConfigs[planetKey] || planetConfigs.terra;
+
+        let scene, camera, renderer, terrainMesh;
+        let velocity = new THREE.Vector3();
+        let move = { forward: false, backward: false, left: false, right: false, run: false };
+        let canJump = true;
+        let particles;
+
+        let yaw = 0;
+        let pitch = 0;
+
+        function init() {
+            document.getElementById('planet-name').textContent = config.name;
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(config.fogColor, config.fogDensity);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            camera.position.set(0, 15, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const sunLight = new THREE.DirectionalLight(0xffffff, 1.1);
+            sunLight.position.set(50, 80, 30);
+            scene.add(sunLight);
+
+            createSky();
+            createTerrain();
+            createDistantBackground();
+            createInvisibleWall();   // ← Parede invisível reativada
+            createParticles();
+            setupControls();
+
+            window.addEventListener('resize', onResize);
+            animate();
+        }
+
+        function createSky() {
+            const sky = new THREE.Mesh(
+                new THREE.SphereGeometry(1200, 32, 32),
+                new THREE.MeshBasicMaterial({ color: config.skyColor, side: THREE.BackSide })
+            );
+            scene.add(sky);
+        }
+
+        function createTerrain() {
+            const size = 600;
+            const segments = 100;
+            const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+            geometry.rotateX(-Math.PI / 2);
+
+            const vertices = geometry.attributes.position.array;
+            for (let i = 0; i < vertices.length; i += 3) {
+                const x = vertices[i];
+                const z = vertices[i + 2];
+                vertices[i + 1] = Math.sin(x * 0.04) * 4 + Math.cos(z * 0.04) * 3.5 + Math.random() * 2.2;
+            }
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshPhongMaterial({
+                color: config.terrainColor,
+                flatShading: true,
+                shininess: 6
+            });
+
+            terrainMesh = new THREE.Mesh(geometry, material);
+            scene.add(terrainMesh);
+        }
+
+        function createDistantBackground() {
+            for (let layer = 0; layer < 5; layer++) {
+                const radius = 280 + layer * 40;
+                const height = 35 + layer * 8;
+
+                const geometry = new THREE.CylinderGeometry(radius, radius, height, 32, 1, true);
+                const material = new THREE.MeshBasicMaterial({
+                    color: config.fogColor,
+                    transparent: true,
+                    opacity: 0.25 - layer * 0.04,
+                    side: THREE.BackSide,
+                    depthWrite: false
+                });
+
+                const bg = new THREE.Mesh(geometry, material);
+                bg.position.y = height / 2 - 15;
+                scene.add(bg);
+            }
+        }
+
+        function createInvisibleWall() {
+            const radius = 600;   // Raio da parede invisível (ajuste se quiser)
+            const geometry = new THREE.CylinderGeometry(radius, radius, 80, 64, 1, true);
+            const material = new THREE.MeshBasicMaterial({ visible: false });
+            const wall = new THREE.Mesh(geometry, material);
+            wall.position.y = 30;
+            scene.add(wall);
+        }
+
+        function getTerrainHeight(x, z) {
+            if (!terrainMesh) return 6;
+            const worldPos = new THREE.Vector3(x, 100, z);
+            const raycaster = new THREE.Raycaster(worldPos, new THREE.Vector3(0, -1, 0));
+            const intersects = raycaster.intersectObject(terrainMesh);
+            return intersects.length > 0 ? intersects[0].point.y + 2.2 : 6;
+        }
+
+        function isInsideWall(x, z) {
+            const distance = Math.sqrt(x*x + z*z);
+            return distance > 153;   // Raio da parede
+        }
+
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            for (let i = 0; i < config.particleCount; i++) {
+                positions.push(Math.random() * 500 - 250, Math.random() * 80 + 5, Math.random() * 500 - 250);
+            }
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+            particles = new THREE.Points(
+                geometry,
+                new THREE.PointsMaterial({ color: config.particleColor, size: 0.9, transparent: true, opacity: 0.65 })
+            );
+            scene.add(particles);
+        }
+
+        function setupControls() {
+            const backBtn = document.getElementById('back-btn');
+            backBtn.addEventListener('click', () => window.location.href = 'index.html');
+
+            document.addEventListener('keydown', e => {
+                if (e.code === 'KeyB' || e.code === 'Escape') window.location.href = 'index.html';
+            });
+
+            renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+
+            document.addEventListener('keydown', e => {
+                switch (e.code) {
+                    case 'KeyW': move.forward = true; break;
+                    case 'KeyS': move.backward = true; break;
+                    case 'KeyA': move.left = true; break;
+                    case 'KeyD': move.right = true; break;
+                    case 'ShiftLeft':
+                    case 'ShiftRight': move.run = true; break;
+                    case 'Space': if (canJump) { velocity.y = 24; canJump = false; } break;
+                }
+            });
+
+            document.addEventListener('keyup', e => {
+                switch (e.code) {
+                    case 'KeyW': move.forward = false; break;
+                    case 'KeyS': move.backward = false; break;
+                    case 'KeyA': move.left = false; break;
+                    case 'KeyD': move.right = false; break;
+                    case 'ShiftLeft':
+                    case 'ShiftRight': move.run = false; break;
+                }
+            });
+
+            document.addEventListener('mousemove', e => {
+                if (!document.pointerLockElement) return;
+                yaw   -= e.movementX * 0.002;
+                pitch -= e.movementY * 0.002;
+                pitch = Math.max(-1.4, Math.min(1.4, pitch));
+
+                const quaternion = new THREE.Quaternion();
+                quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+                camera.quaternion.copy(quaternion);
+            });
+        }
+
+        function updatePlayer(delta) {
+            const speed = move.run ? 45 : 20;
+            const direction = new THREE.Vector3();
+
+            if (move.forward) direction.z -= 1;
+            if (move.backward) direction.z += 1;
+            if (move.left) direction.x -= 1;
+            if (move.right) direction.x += 1;
+
+            direction.normalize().applyQuaternion(camera.quaternion);
+
+            velocity.x = direction.x * speed;
+            velocity.z = direction.z * speed;
+            velocity.y -= 35 * delta;
+
+            let newX = camera.position.x + velocity.x * delta;
+            let newZ = camera.position.z + velocity.z * delta;
+
+            // Bloqueia se tentar atravessar a parede invisível
+            if (!isInsideWall(newX, newZ)) {
+                camera.position.x = newX;
+                camera.position.z = newZ;
+            }
+
+            camera.position.y += velocity.y * delta;
+
+            const groundY = getTerrainHeight(camera.position.x, camera.position.z);
+            if (camera.position.y < groundY) {
+                camera.position.y = groundY;
+                velocity.y = 0;
+                canJump = true;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = 0.016;
+            if (particles) particles.rotation.y += 0.00008;
+            updatePlayer(delta);
+            renderer.render(scene, camera);
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        init();
+        
+    </script>
+</body>
+</html>
